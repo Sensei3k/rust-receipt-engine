@@ -6,6 +6,9 @@ use tokio::fs;
 /// Directory where downloaded receipt files are saved at runtime.
 const DOWNLOAD_DIR: &str = "/private/tmp/receipt_engine";
 
+/// Maximum file size accepted for download — protects against memory exhaustion.
+const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
+
 /// Fetches the oldest pending notification from the Green API queue.
 /// Returns None when the queue is empty (Green API responds with "null").
 pub async fn receive_notification(
@@ -93,12 +96,31 @@ pub async fn download_file(
     let filename = format!("receipt_{}.{}", receipt_id, extension);
     let dest = dir.join(filename);
 
-    let bytes = client
-        .get(&file_data.download_url)
-        .send()
-        .await?
-        .bytes()
-        .await?;
+    let response = client.get(&file_data.download_url).send().await?;
+
+    // Reject before downloading if the server advertises a size over the limit.
+    if let Some(len) = response.content_length() {
+        if len > MAX_FILE_BYTES {
+            return Err(format!(
+                "File too large: {} bytes (limit {} bytes)",
+                len, MAX_FILE_BYTES
+            )
+            .into());
+        }
+    }
+
+    let bytes = response.bytes().await?;
+
+    // Enforce the limit on the actual payload in case Content-Length was absent or wrong.
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!(
+            "File too large: {} bytes (limit {} bytes)",
+            bytes.len(),
+            MAX_FILE_BYTES
+        )
+        .into());
+    }
+
     fs::write(&dest, &bytes).await?;
 
     Ok(dest)
