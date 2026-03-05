@@ -9,6 +9,19 @@ const DOWNLOAD_DIR: &str = "/private/tmp/receipt_engine";
 /// Maximum file size accepted for download — protects against memory exhaustion.
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024; // 10 MB
 
+/// Builds a Green API endpoint URL.
+///
+/// # Security note
+/// Green API embeds the API token in the URL path — this is their required authentication
+/// scheme and cannot be changed to a header. Never log or print these URLs; doing so would
+/// expose the token in stdout, log files, and any intermediate proxy access logs.
+fn api_url(instance_id: &str, path: &str, api_token: &str) -> String {
+    format!(
+        "https://api.green-api.com/waInstance{}/{}/{}",
+        instance_id, path, api_token
+    )
+}
+
 /// Fetches the oldest pending notification from the Green API queue.
 /// Returns None when the queue is empty (Green API responds with "null").
 pub async fn receive_notification(
@@ -16,10 +29,7 @@ pub async fn receive_notification(
     instance_id: &str,
     api_token: &str,
 ) -> Result<Option<Notification>, Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://api.green-api.com/waInstance{}/receiveNotification/{}",
-        instance_id, api_token
-    );
+    let url = api_url(instance_id, "receiveNotification", api_token);
 
     let body = client.get(&url).send().await?.text().await?;
 
@@ -39,8 +49,9 @@ pub async fn delete_notification(
     receipt_id: u64,
 ) -> Result<(), reqwest::Error> {
     let url = format!(
-        "https://api.green-api.com/waInstance{}/deleteNotification/{}/{}",
-        instance_id, api_token, receipt_id
+        "{}/{}",
+        api_url(instance_id, "deleteNotification", api_token),
+        receipt_id
     );
 
     client.delete(&url).send().await?.error_for_status()?;
@@ -56,10 +67,7 @@ pub async fn send_message(
     chat_id: &str,
     message: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let url = format!(
-        "https://api.green-api.com/waInstance{}/sendMessage/{}",
-        instance_id, api_token
-    );
+    let url = api_url(instance_id, "sendMessage", api_token);
 
     let body = serde_json::json!({
         "chatId": chat_id,
