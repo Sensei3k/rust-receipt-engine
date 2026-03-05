@@ -10,7 +10,9 @@ A Rust service that watches a WhatsApp chat or group for payment receipts (image
 4. Parses the OCR text to extract sender name, bank, and amount
 5. Replies to the chat with:
    ```
-   ✅ Sender: FULL NAME | Bank: BankName | Amount: ₦97,800.00
+   ✅ Sender: FULL NAME
+   Bank: BankName
+   Amount: ₦97,800.00
    ```
 
 ## Project structure
@@ -39,23 +41,35 @@ brew install tesseract poppler pkgconf
 
 ## Setup
 
-1. Clone the repo and create a `.env` file in the project root:
+1. Clone the repo and copy the env template:
+   ```bash
+   cp .env.example .env
    ```
-   GREEN_API_INSTANCE_ID=your_instance_id
-   GREEN_API_TOKEN=your_api_token
-   ```
+   Fill in your credentials from the [Green API dashboard](https://green-api.com/).
 
 2. Build and run:
    ```bash
    cargo run
    ```
 
-**Optional env vars:**
+## Commands
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RECEIPT_DOWNLOAD_DIR` | OS temp dir (`/tmp/receipt_engine`) | Where downloaded receipt files are saved |
-| `RUST_LOG` | `info` | Log level — `debug`, `info`, `warn`, `error` |
+| Command | Description |
+|---------|-------------|
+| `cargo run` | Build and start the polling service |
+| `cargo build --release` | Compile an optimised production binary |
+| `cargo test` | Run the test suite |
+| `cargo check` | Fast type-check without producing a binary |
+| `RUST_LOG=debug cargo run` | Run with verbose debug logging |
+
+## Environment variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `GREEN_API_INSTANCE_ID` | Yes | — | Instance ID from the Green API dashboard |
+| `GREEN_API_TOKEN` | Yes | — | API token shown next to your instance |
+| `RECEIPT_DOWNLOAD_DIR` | No | OS temp dir | Directory where receipt files are saved during OCR |
+| `RUST_LOG` | No | `info` | Log verbosity — `debug`, `info`, `warn`, `error` |
 
 ## Notes
 
