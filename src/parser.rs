@@ -20,8 +20,10 @@ static SENDER_LABEL_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static FALLBACK_SENDER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Use [ ] (literal space only) in the name capture group — \s would match \n
+    // and cause the name to bleed onto the next line of the receipt.
     Regex::new(
-        r"(?i)(?:sender(?:\s+name)?|from|originator)\s*[:\-]?\s*([A-Za-z][A-Za-z\s]{2,40})",
+        r"(?i)(?:sender(?:\s+name)?|from|originator)\s*[:\-]?\s*([A-Za-z][A-Za-z ]{2,40})",
     )
     .unwrap()
 });
@@ -43,11 +45,14 @@ pub fn parse_receipt(text: &str) -> ParsedReceipt {
         .collect();
 
     let amount = AMOUNT_RE.find(text).map(|m| {
-        // Strip any OCR-introduced spaces within the number, then normalise the symbol.
-        m.as_str()
-            .split_whitespace()
-            .collect::<String>()
-            .replace('#', "₦")
+        // Strip any OCR-introduced spaces within the number, then normalise the currency symbol.
+        // Both "#" (Tesseract artefact) and "NGN" prefix are mapped to "₦".
+        let joined = m.as_str().split_whitespace().collect::<String>();
+        let with_naira = joined.replace('#', "₦");
+        match with_naira.strip_prefix("NGN") {
+            Some(rest) => format!("₦{rest}"),
+            None => with_naira,
+        }
     });
 
     let mut sender: Option<String> = None;
