@@ -169,26 +169,7 @@ impl SheetsClient {
             None => return Ok(Vec::new()),
         };
 
-        // Skip index 0 (header row). For a row at array index i, the sheet row
-        // number is i + 1 (the header occupies sheet row 1, so data starts at 2,
-        // meaning array index 1 → sheet row 2, i.e. i + 1).
-        let mut pending = Vec::new();
-        for (i, entry) in rows.iter().enumerate().skip(1) {
-            let cols = match entry.as_array() {
-                Some(c) => c,
-                None => continue,
-            };
-
-            // D = index 3 (Confirmed), F = index 5 (AcknowledgedAt)
-            if col_str(cols, 3) == "TRUE" && col_str(cols, 5).is_empty() {
-                pending.push(PendingRow {
-                    row_index: i + 1,
-                    message_id: col_str(cols, 4).to_string(), // E
-                    chat_id:    col_str(cols, 6).to_string(), // G
-                });
-            }
-        }
-
+        let pending = pending_from_rows(rows);
         info!(count = pending.len(), "Pending confirmed rows fetched");
         Ok(pending)
     }
@@ -293,6 +274,37 @@ fn col_str(cols: &[serde_json::Value], index: usize) -> &str {
         .unwrap_or("")
 }
 
+/// Scans a slice of raw JSON row values (as returned by the Sheets API `values` array)
+/// and returns a `PendingRow` for every data row where:
+///   - Column D (index 3) equals "TRUE"  — user has ticked the Confirmed checkbox
+///   - Column F (index 5) is empty       — engine has not yet written AcknowledgedAt
+///
+/// Row index 0 is treated as the header and is always skipped.
+/// The returned `row_index` is 1-based (matching sheet row numbers):
+///   array index 1 → sheet row 2, array index n → sheet row n+1.
+fn pending_from_rows(rows: &[serde_json::Value]) -> Vec<PendingRow> {
+    let mut pending = Vec::new();
+    // Skip index 0 (header row). For a row at array index i, the sheet row
+    // number is i + 1 (the header occupies sheet row 1, so data starts at 2,
+    // meaning array index 1 → sheet row 2, i.e. i + 1).
+    for (i, entry) in rows.iter().enumerate().skip(1) {
+        let cols = match entry.as_array() {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // D = index 3 (Confirmed), F = index 5 (AcknowledgedAt)
+        if col_str(cols, 3) == "TRUE" && col_str(cols, 5).is_empty() {
+            pending.push(PendingRow {
+                row_index: i + 1,
+                message_id: col_str(cols, 4).to_string(), // E
+                chat_id:    col_str(cols, 6).to_string(), // G
+            });
+        }
+    }
+    pending
+}
+
 /// Extracts the bare spreadsheet ID from either a raw ID or a full Google Sheets URL.
 ///
 /// Handles the two forms users typically copy from their browser:
@@ -309,5 +321,211 @@ fn extract_spreadsheet_id(input: &str) -> &str {
             .next()
             .unwrap_or(after_d),
         None => input,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── extract_spreadsheet_id ────────────────────────────────────────────────
+
+    #[test]
+    fn id_bare_passthrough() {
+        assert_eq!(
+            extract_spreadsheet_id("1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"),
+            "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+        );
+    }
+
+    #[test]
+    fn id_full_url_edit_suffix() {
+        assert_eq!(
+            extract_spreadsheet_id(
+                "https://docs.google.com/spreadsheets/d/SHEET_ID/edit"
+            ),
+            "SHEET_ID"
+        );
+    }
+
+    #[test]
+    fn id_full_url_gid_anchor() {
+        assert_eq!(
+            extract_spreadsheet_id(
+                "https://docs.google.com/spreadsheets/d/SHEET_ID/edit#gid=0"
+            ),
+            "SHEET_ID"
+        );
+    }
+
+    #[test]
+    fn id_full_url_query_param() {
+        assert_eq!(
+            extract_spreadsheet_id(
+                "https://docs.google.com/spreadsheets/d/SHEET_ID?usp=sharing"
+            ),
+            "SHEET_ID"
+        );
+    }
+
+    #[test]
+    fn id_full_url_edit_and_anchor() {
+        assert_eq!(
+            extract_spreadsheet_id(
+                "https://docs.google.com/spreadsheets/d/SHEET_ID/edit?usp=sharing#gid=123"
+            ),
+            "SHEET_ID"
+        );
+    }
+
+    // ── col_str ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn col_str_valid_string_first_col() {
+        let cols = vec![json!("hello"), json!("world")];
+        assert_eq!(col_str(&cols, 0), "hello");
+    }
+
+    #[test]
+    fn col_str_valid_string_later_col() {
+        let cols = vec![json!("a"), json!("b"), json!("c")];
+        assert_eq!(col_str(&cols, 2), "c");
+    }
+
+    #[test]
+    fn col_str_index_out_of_bounds_returns_empty() {
+        let cols = vec![json!("only")];
+        assert_eq!(col_str(&cols, 5), "");
+    }
+
+    #[test]
+    fn col_str_json_null_returns_empty() {
+        let cols = vec![json!(null)];
+        assert_eq!(col_str(&cols, 0), "");
+    }
+
+    #[test]
+    fn col_str_json_boolean_returns_empty() {
+        // Google may send raw booleans for unformatted checkboxes.
+        let cols = vec![json!(true)];
+        assert_eq!(col_str(&cols, 0), "");
+    }
+
+    #[test]
+    fn col_str_json_number_returns_empty() {
+        let cols = vec![json!(42)];
+        assert_eq!(col_str(&cols, 0), "");
+    }
+
+    // ── pending_from_rows ─────────────────────────────────────────────────────
+
+    /// Build a full A–G row as the Sheets API would return it.
+    fn make_row(sender: &str, bank: &str, amount: &str, confirmed: &str, msg_id: &str, ack: &str, chat_id: &str) -> serde_json::Value {
+        json!([sender, bank, amount, confirmed, msg_id, ack, chat_id])
+    }
+
+    fn header() -> serde_json::Value {
+        json!(["Sender", "Bank", "Amount", "Confirmed", "MessageID", "AcknowledgedAt", "ChatID"])
+    }
+
+    #[test]
+    fn pending_empty_array_returns_empty() {
+        assert!(pending_from_rows(&[]).is_empty());
+    }
+
+    #[test]
+    fn pending_header_only_returns_empty() {
+        // Array index 0 is always skipped as the header row.
+        let rows = vec![header()];
+        assert!(pending_from_rows(&rows).is_empty());
+    }
+
+    #[test]
+    fn pending_confirmed_unacknowledged_is_included() {
+        let rows = vec![
+            header(),
+            make_row("Ada Obi", "GTBank", "₦5,000.00", "TRUE", "MSG001", "", "2349000000001@c.us"),
+        ];
+        let pending = pending_from_rows(&rows);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "MSG001");
+        assert_eq!(pending[0].chat_id, "2349000000001@c.us");
+    }
+
+    #[test]
+    fn pending_confirmed_already_acknowledged_is_excluded() {
+        let rows = vec![
+            header(),
+            make_row("Ada Obi", "GTBank", "₦5,000.00", "TRUE", "MSG001", "2024-01-01T00:00:00Z", "chat@c.us"),
+        ];
+        assert!(pending_from_rows(&rows).is_empty());
+    }
+
+    #[test]
+    fn pending_not_confirmed_is_excluded() {
+        let rows = vec![
+            header(),
+            make_row("Ada Obi", "GTBank", "₦5,000.00", "FALSE", "MSG001", "", "chat@c.us"),
+        ];
+        assert!(pending_from_rows(&rows).is_empty());
+    }
+
+    #[test]
+    fn pending_row_index_is_one_based_sheet_row() {
+        // Array index 1 → sheet row 2, array index 2 → sheet row 3.
+        let rows = vec![
+            header(),
+            make_row("Sender A", "BankA", "₦1.00", "TRUE", "M1", "", "c1@c.us"),
+            make_row("Sender B", "BankB", "₦2.00", "TRUE", "M2", "", "c2@c.us"),
+        ];
+        let pending = pending_from_rows(&rows);
+        assert_eq!(pending[0].row_index, 2);
+        assert_eq!(pending[1].row_index, 3);
+    }
+
+    #[test]
+    fn pending_mixed_rows_only_returns_unacknowledged_confirmed() {
+        let rows = vec![
+            header(),
+            make_row("A", "BankA", "₦1.00", "TRUE",  "M1", "",                    "c1@c.us"), // included
+            make_row("B", "BankB", "₦2.00", "FALSE", "M2", "",                    "c2@c.us"), // excluded — not confirmed
+            make_row("C", "BankC", "₦3.00", "TRUE",  "M3", "2024-01-01T00:00:00Z","c3@c.us"), // excluded — already ack'd
+            make_row("D", "BankD", "₦4.00", "TRUE",  "M4", "",                    "c4@c.us"), // included
+        ];
+        let pending = pending_from_rows(&rows);
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].message_id, "M1");
+        assert_eq!(pending[1].message_id, "M4");
+        assert_eq!(pending[0].row_index, 2);
+        assert_eq!(pending[1].row_index, 5);
+    }
+
+    #[test]
+    fn pending_short_row_missing_message_id_and_chat_id() {
+        // Google omits trailing empty cells — a row may have fewer than 7 columns.
+        // Columns E and G will be absent; col_str returns "" for those.
+        let rows = vec![
+            header(),
+            json!(["Sender", "Bank", "Amount", "TRUE"]), // only 4 cols
+        ];
+        let pending = pending_from_rows(&rows);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].message_id, "");
+        assert_eq!(pending[0].chat_id, "");
+        assert_eq!(pending[0].row_index, 2);
+    }
+
+    #[test]
+    fn pending_non_array_entry_is_skipped() {
+        // Defensive: if a row is not a JSON array, skip it silently.
+        let rows = vec![
+            header(),
+            json!("not an array"),
+            make_row("Ada", "GTBank", "₦1.00", "TRUE", "M1", "", "c@c.us"),
+        ];
+        let pending = pending_from_rows(&rows);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].row_index, 3); // array index 2 → sheet row 3
     }
 }
