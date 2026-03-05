@@ -83,7 +83,7 @@ async fn main() {
 
                                         if let Some(chat_id) = chat_id {
                                             let reply = format!(
-                                                "✅ Sender: {} | Bank: {} | Amount: {}",
+                                                "✅ Sender: {}\nBank: {}\nAmount: {}",
                                                 parsed.sender.as_deref().unwrap_or("unknown"),
                                                 parsed.bank.as_deref().unwrap_or("unknown"),
                                                 parsed.amount.as_deref().unwrap_or("unknown"),
