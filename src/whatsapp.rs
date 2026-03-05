@@ -40,7 +40,7 @@ pub async fn delete_notification(
         instance_id, api_token, receipt_id
     );
 
-    client.delete(&url).send().await?;
+    client.delete(&url).send().await?.error_for_status()?;
     Ok(())
 }
 
