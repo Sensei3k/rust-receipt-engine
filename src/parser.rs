@@ -16,12 +16,23 @@ static SENDER_LABEL_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Primary pattern (OPay / Moniepoint style):
     //   "Sender Details  FULL NAME"  ← name on same line as label
     //   "BankName | account"         ← bank on the very next line
-    Regex::new(r"(?i)sender\s+details?\s+(.+)").unwrap()
+    //
+    // Capture group restricted to [A-Za-z ] — same constraint as FALLBACK_SENDER_RE.
+    // This prevents OCR garbage after the name (e.g. "#!@$", digits, symbols) from
+    // being included in the captured value. The match stops at the first non-letter,
+    // non-space character; trailing spaces are stripped by .trim() at call site.
+    Regex::new(r"(?i)sender\s+details?\s+([A-Za-z][A-Za-z ]{2,40})").unwrap()
 });
 
 static FALLBACK_SENDER_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Use [ ] (literal space only) in the name capture group — \s would match \n
     // and cause the name to bleed onto the next line of the receipt.
+    //
+    // The upper bound of {2,40} is a practical limit: real names fit comfortably
+    // within 40 characters after the leading letter. If OCR produces a longer run
+    // of letters and spaces (e.g. a garbled paragraph), the match stops at 41 chars
+    // and the excess is silently dropped. This is a known limitation — it protects
+    // against runaway captures at the cost of truncating unusually long names.
     Regex::new(
         r"(?i)(?:sender(?:\s+name)?|from|originator)\s*[:\-]?\s*([A-Za-z][A-Za-z ]{2,40})",
     )
@@ -47,6 +58,12 @@ pub fn parse_receipt(text: &str) -> ParsedReceipt {
     let amount = AMOUNT_RE.find(text).map(|m| {
         // Strip any OCR-introduced spaces within the number, then normalise the currency symbol.
         // Both "#" (Tesseract artefact) and "NGN" prefix are mapped to "₦".
+        //
+        // Order matters: '#' is replaced before strip_prefix("NGN") is checked.
+        // A pathological string like "#NGN97,800.00" would survive as "₦NGN97,800.00"
+        // because the '#' → '₦' substitution happens first, making it no longer start
+        // with "NGN". This is an acceptable edge case — real receipts don't mix both
+        // prefixes, and the regex would never match "#NGN..." in practice.
         let joined = m.as_str().split_whitespace().collect::<String>();
         let with_naira = joined.replace('#', "₦");
         match with_naira.strip_prefix("NGN") {
