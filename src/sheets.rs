@@ -39,6 +39,12 @@ pub struct SheetsClient {
 impl SheetsClient {
     /// Reads the service account key file at `key_path` and constructs a client
     /// targeting `spreadsheet_id`. Fails fast if the key file is missing or malformed.
+    ///
+    /// `spreadsheet_id` accepts either a bare ID or a full Google Sheets URL —
+    /// both forms appear in the browser address bar and user configuration:
+    ///   - Bare ID:  `1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms`
+    ///   - Full URL: `https://docs.google.com/spreadsheets/d/<ID>/edit`
+    /// The ID is extracted automatically when a URL is supplied.
     pub async fn new(
         key_path: &str,
         spreadsheet_id: String,
@@ -46,7 +52,7 @@ impl SheetsClient {
         let key = yup_oauth2::read_service_account_key(key_path).await?;
         Ok(Self {
             http: Client::new(),
-            spreadsheet_id,
+            spreadsheet_id: extract_spreadsheet_id(&spreadsheet_id).to_string(),
             key,
             cached_token: Mutex::new(None),
         })
@@ -109,6 +115,11 @@ impl SheetsClient {
 
     /// Returns a valid access token, refreshing from Google if the cached one
     /// has expired or was never fetched.
+    ///
+    /// Note: a new `Authenticator` is built on each refresh rather than stored,
+    /// which avoids exposing yup-oauth2's generic connector type in our struct.
+    /// The authenticator construction is fast (no network call); only `token()`
+    /// hits the network, and that result is cached for 55 minutes.
     async fn access_token(&self) -> Result<String, Box<dyn std::error::Error>> {
         let mut guard = self.cached_token.lock().await;
 
@@ -138,5 +149,24 @@ impl SheetsClient {
 
         info!("Google OAuth2 token refreshed");
         Ok(value)
+    }
+}
+
+/// Extracts the bare spreadsheet ID from either a raw ID or a full Google Sheets URL.
+///
+/// Handles the two forms users typically copy from their browser:
+///   - `https://docs.google.com/spreadsheets/d/{ID}/edit`
+///   - `https://docs.google.com/spreadsheets/d/{ID}/edit#gid=0`
+///
+/// If the input doesn't contain `/d/`, it is returned unchanged (already a bare ID).
+fn extract_spreadsheet_id(input: &str) -> &str {
+    // Split on "/d/" and take the segment that follows.
+    // Then trim everything from the first '/', '?', or '#' onwards.
+    match input.split("/d/").nth(1) {
+        Some(after_d) => after_d
+            .split(|c| c == '/' || c == '?' || c == '#')
+            .next()
+            .unwrap_or(after_d),
+        None => input,
     }
 }
