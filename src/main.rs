@@ -1,21 +1,22 @@
-// Phase 1 — Poll Green API for new WhatsApp messages and print them to the terminal.
+// Phase 2 — Detect image attachments, download them to a temp folder,
+// and confirm receipt in the terminal.
 //
-// Green API works on a "receive & delete" model:
-//   1. Call /receiveNotification  → get the oldest queued notification (if any)
-//   2. Call /deleteNotification   → acknowledge it so it doesn't come back
-// We repeat this loop every 5 seconds.
+// Green API "receive & delete" poll model (same as Phase 1):
+//   1. Call /receiveNotification  → get the oldest queued notification
+//   2. Call /deleteNotification   → acknowledge it so it doesn't repeat
 
 use dotenv::dotenv;
 use reqwest::Client;
 use serde::Deserialize;
 use std::env;
+use std::path::PathBuf;
+use tokio::fs;
 use tokio::time::{sleep, Duration};
 
 // --------------------------------------------------------------------------
-// Data structures — modelled on the actual JSON Green API returns
+// Data structures
 // --------------------------------------------------------------------------
 
-// Top-level envelope. receiptId is needed to delete the notification.
 #[derive(Debug, Deserialize)]
 struct Notification {
     #[serde(rename = "receiptId")]
@@ -23,7 +24,6 @@ struct Notification {
     body: NotificationBody,
 }
 
-// The body tells us who sent the message and what kind of event it is.
 #[derive(Debug, Deserialize)]
 struct NotificationBody {
     #[serde(rename = "typeWebhook")]
@@ -36,48 +36,59 @@ struct NotificationBody {
     message_data: Option<MessageData>,
 }
 
-// Sender information — name and phone number.
 #[derive(Debug, Deserialize)]
 struct SenderData {
     #[serde(rename = "senderName")]
     sender_name: Option<String>,
 
-    // Phone number in WhatsApp format, e.g. "447427749650@c.us"
     #[serde(rename = "sender")]
     sender: Option<String>,
 }
 
-// Message content wrapper.
-// Green API uses different sub-objects depending on message type:
+// Green API message types we handle:
 //   "textMessage"         → textMessageData.textMessage
-//   "extendedTextMessage" → extendedTextMessageData.text  (links, forwarded msgs, etc.)
-//   "imageMessage"        → imageMessageData              (Phase 2)
+//   "extendedTextMessage" → extendedTextMessageData.text
+//   "imageMessage"        → imageMessageData.downloadUrl  (Phase 2)
 #[derive(Debug, Deserialize)]
 struct MessageData {
     #[serde(rename = "typeMessage")]
     type_message: String,
 
-    // Plain text messages
     #[serde(rename = "textMessageData")]
     text_message_data: Option<TextMessageData>,
 
-    // Extended text (links, forwarded messages — the common case for plain texts too)
     #[serde(rename = "extendedTextMessageData")]
     extended_text_message_data: Option<ExtendedTextMessageData>,
+
+    // Present when typeMessage == "imageMessage"
+    #[serde(rename = "fileMessageData")]
+    image_message_data: Option<ImageMessageData>,
 }
 
-// Used when typeMessage == "textMessage"
 #[derive(Debug, Deserialize)]
 struct TextMessageData {
     #[serde(rename = "textMessage")]
     text_message: String,
 }
 
-// Used when typeMessage == "extendedTextMessage"
 #[derive(Debug, Deserialize)]
 struct ExtendedTextMessageData {
-    // The actual message text lives here (not in a nested "textMessage" field)
     text: String,
+}
+
+// Metadata for an incoming image attachment.
+#[derive(Debug, Deserialize)]
+struct ImageMessageData {
+    // The URL we fetch to download the actual image bytes
+    #[serde(rename = "downloadUrl")]
+    download_url: String,
+
+    // File extension hint, e.g. "image/jpeg" — used to pick a file extension
+    #[serde(rename = "mimeType")]
+    mime_type: Option<String>,
+
+    // Optional text the sender typed alongside the image
+    caption: Option<String>,
 }
 
 impl MessageData {
@@ -91,6 +102,45 @@ impl MessageData {
         }
         None
     }
+}
+
+// --------------------------------------------------------------------------
+// Image download
+// --------------------------------------------------------------------------
+
+/// Download an image from `url` and save it to the system temp directory.
+/// Returns the full path of the saved file on success.
+///
+/// The filename is built from the receipt_id so it's unique per message,
+/// e.g. /tmp/receipt_engine/image_3.jpg
+async fn download_image(
+    client: &Client,
+    url: &str,
+    mime_type: Option<&str>,
+    receipt_id: u64,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    // Pick a file extension from the mime type, defaulting to .jpg
+    let extension = match mime_type {
+        Some("image/png") => "png",
+        Some("image/gif") => "gif",
+        Some("image/webp") => "webp",
+        _ => "jpg",
+    };
+
+    // Build the destination folder and create it if it doesn't exist
+    let dir = PathBuf::from("/tmp/receipt_engine");
+    fs::create_dir_all(&dir).await?;
+
+    let filename = format!("image_{}.{}", receipt_id, extension);
+    let dest = dir.join(filename);
+
+    // Fetch the image bytes
+    let bytes = client.get(url).send().await?.bytes().await?;
+
+    // Write to disk
+    fs::write(&dest, &bytes).await?;
+
+    Ok(dest)
 }
 
 // --------------------------------------------------------------------------
@@ -120,7 +170,6 @@ async fn receive_notification(
 }
 
 /// Acknowledge a notification so Green API removes it from the queue.
-/// Must be called after every successful receive.
 async fn delete_notification(
     client: &Client,
     instance_id: &str,
@@ -136,7 +185,7 @@ async fn delete_notification(
     Ok(())
 }
 
-/// Print a notification to the terminal in a readable format.
+/// Print a notification summary to the terminal.
 fn print_notification(n: &Notification) {
     let body = &n.body;
     println!("---");
@@ -153,9 +202,16 @@ fn print_notification(n: &Notification) {
     if let Some(msg) = &body.message_data {
         println!("MsgType: {}", msg.type_message);
 
-        match msg.text() {
-            Some(text) => println!("Text   : {}", text),
-            None => println!("Text   : (no text — image or other attachment)"),
+        if let Some(text) = msg.text() {
+            println!("Text   : {}", text);
+        }
+
+        if let Some(img) = &msg.image_message_data {
+            if let Some(caption) = &img.caption {
+                if !caption.is_empty() {
+                    println!("Caption: {}", caption);
+                }
+            }
         }
     }
 
@@ -184,6 +240,25 @@ async fn main() {
         match receive_notification(&client, &instance_id, &api_token).await {
             Ok(Some(notification)) => {
                 print_notification(&notification);
+
+                // If this message contains an image, download it now
+                if let Some(msg) = &notification.body.message_data {
+                    if let Some(img) = &msg.image_message_data {
+                        println!("Image detected — downloading...");
+
+                        match download_image(
+                            &client,
+                            &img.download_url,
+                            img.mime_type.as_deref(),
+                            notification.receipt_id,
+                        )
+                        .await
+                        {
+                            Ok(path) => println!("Image saved to: {}", path.display()),
+                            Err(e) => eprintln!("Failed to download image: {}", e),
+                        }
+                    }
+                }
 
                 if let Err(e) = delete_notification(
                     &client,
