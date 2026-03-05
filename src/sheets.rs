@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use time::format_description::well_known::Rfc3339;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{info, warn};
 use yup_oauth2::ServiceAccountKey;
 
 /// OAuth2 scope required for reading and writing Google Sheets.
@@ -198,7 +198,10 @@ impl SheetsClient {
 
         let timestamp = OffsetDateTime::now_utc()
             .format(&Rfc3339)
-            .unwrap_or_else(|_| "unknown".to_string());
+            .unwrap_or_else(|e| {
+                warn!(error = %e, row_index, "RFC 3339 timestamp format failed — writing \"unknown\" to AcknowledgedAt");
+                "unknown".to_string()
+            });
 
         let body = serde_json::json!({
             "range": &cell,
