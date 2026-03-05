@@ -10,6 +10,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use std::env;
 use std::path::PathBuf;
+use std::process::Command;
 use tokio::fs;
 use tokio::time::{sleep, Duration};
 
@@ -124,6 +125,7 @@ async fn download_image(
         Some("image/png") => "png",
         Some("image/gif") => "gif",
         Some("image/webp") => "webp",
+        Some("application/pdf") => "pdf",
         _ => "jpg",
     };
 
@@ -151,6 +153,51 @@ async fn download_image(
 fn ocr_image(path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
     let text = tesseract::ocr(path.to_str().unwrap(), "eng")?;
     Ok(text)
+}
+
+/// Convert each page of a PDF to a JPEG using pdftoppm, then OCR each page.
+/// Returns all pages' text concatenated.
+fn ocr_pdf(pdf_path: &std::path::Path) -> Result<String, Box<dyn std::error::Error>> {
+    let dir = pdf_path.parent().unwrap();
+    let stem = pdf_path.file_stem().unwrap().to_str().unwrap();
+    let prefix = dir.join(stem);
+
+    // pdftoppm -jpeg <pdf> <output_prefix>  →  <prefix>-1.jpg, <prefix>-2.jpg, …
+    let status = Command::new("pdftoppm")
+        .args(["-jpeg", pdf_path.to_str().unwrap(), prefix.to_str().unwrap()])
+        .status()?;
+
+    if !status.success() {
+        return Err("pdftoppm failed".into());
+    }
+
+    // Collect and OCR each generated page image
+    let mut all_text = String::new();
+    let mut page = 1;
+    loop {
+        // pdftoppm zero-pads page numbers, e.g. -01, -001 depending on count.
+        // Glob both patterns to find the right file.
+        let candidates = [
+            dir.join(format!("{}-{}.jpg", stem, page)),
+            dir.join(format!("{}-{:02}.jpg", stem, page)),
+            dir.join(format!("{}-{:03}.jpg", stem, page)),
+        ];
+
+        let page_path = candidates.iter().find(|p| p.exists());
+        match page_path {
+            None => break,
+            Some(p) => {
+                println!("  OCR page {}...", page);
+                match ocr_image(p) {
+                    Ok(text) => all_text.push_str(&text),
+                    Err(e) => eprintln!("  OCR failed on page {}: {}", page, e),
+                }
+                page += 1;
+            }
+        }
+    }
+
+    Ok(all_text)
 }
 
 // --------------------------------------------------------------------------
@@ -251,10 +298,11 @@ async fn main() {
             Ok(Some(notification)) => {
                 print_notification(&notification);
 
-                // If this message contains an image, download it now
+                // If this message contains an image or document, download and OCR it
                 if let Some(msg) = &notification.body.message_data {
                     if let Some(img) = &msg.image_message_data {
-                        println!("Image detected — downloading...");
+                        let is_pdf = img.mime_type.as_deref() == Some("application/pdf");
+                        println!("{} detected — downloading...", if is_pdf { "PDF" } else { "Image" });
 
                         match download_image(
                             &client,
@@ -265,14 +313,19 @@ async fn main() {
                         .await
                         {
                             Ok(path) => {
-                                println!("Image saved to: {}", path.display());
+                                println!("File saved to: {}", path.display());
                                 println!("Running OCR...");
-                                match ocr_image(&path) {
+                                let result = if is_pdf {
+                                    ocr_pdf(&path)
+                                } else {
+                                    ocr_image(&path)
+                                };
+                                match result {
                                     Ok(text) => println!("OCR result:\n{}", text),
                                     Err(e) => eprintln!("OCR failed: {}", e),
                                 }
                             }
-                            Err(e) => eprintln!("Failed to download image: {}", e),
+                            Err(e) => eprintln!("Failed to download file: {}", e),
                         }
                     }
                 }
