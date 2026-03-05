@@ -32,6 +32,8 @@ async fn main() {
             Ok(Some(notification)) => {
                 whatsapp::print_notification(&notification);
 
+                let mut processing_ok = true;
+
                 if let Some(msg) = &notification.body.message_data {
                     if let Some(file_data) = &msg.file_message_data {
                         let is_pdf =
@@ -85,19 +87,36 @@ async fn main() {
                                             {
                                                 Ok(_) => println!("Reply sent to {}", chat_id),
                                                 Err(e) => {
-                                                    eprintln!("Failed to send reply: {}", e)
+                                                    eprintln!("Failed to send reply: {}", e);
+                                                    processing_ok = false;
                                                 }
                                             }
                                         } else {
                                             eprintln!("No chat_id found — cannot send reply");
+                                            processing_ok = false;
                                         }
                                     }
-                                    Err(e) => eprintln!("OCR failed: {}", e),
+                                    Err(e) => {
+                                        eprintln!("OCR failed: {}", e);
+                                        processing_ok = false;
+                                    }
                                 }
                             }
-                            Err(e) => eprintln!("Failed to download file: {}", e),
+                            Err(e) => {
+                                eprintln!("Failed to download file: {}", e);
+                                processing_ok = false;
+                            }
                         }
                     }
+                }
+
+                // Always acknowledge the notification to prevent infinite reprocessing.
+                // If processing failed, log a clear discard notice so nothing is silent.
+                if !processing_ok {
+                    eprintln!(
+                        "Discarding receipt {} after processing failure — will not retry.",
+                        notification.receipt_id
+                    );
                 }
 
                 if let Err(e) = whatsapp::delete_notification(
