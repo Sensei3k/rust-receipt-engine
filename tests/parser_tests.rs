@@ -77,6 +77,15 @@ fn amount_hash_no_comma_grouping() {
 // ── Sender extraction ─────────────────────────────────────────────────────────
 
 #[test]
+fn sender_primary_label_strips_ocr_garbage_after_name() {
+    // OCR often appends symbols or digits on the same line as the name.
+    // The capture group stops at the first non-letter/space character so
+    // garbage like "#!@$" is never included in the returned value.
+    let r = parse_receipt("Sender Details  JOHN DOE #!@$\nGTBank | 0123456789");
+    assert_eq!(r.sender.as_deref(), Some("JOHN DOE"));
+}
+
+#[test]
 fn sender_primary_label_same_line() {
     // OPay / Moniepoint style: "Sender Details  FULL NAME"
     let r = parse_receipt("Sender Details  Jane Okonkwo\nOPay | 8012345678");
