@@ -6,6 +6,7 @@
 //   2. Call /deleteNotification   → acknowledge it so it doesn't repeat
 
 use dotenv::dotenv;
+use regex::Regex;
 use reqwest::Client;
 use serde::Deserialize;
 use std::env;
@@ -201,6 +202,84 @@ fn ocr_pdf(pdf_path: &std::path::Path) -> Result<String, Box<dyn std::error::Err
 }
 
 // --------------------------------------------------------------------------
+// Receipt parsing
+// --------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct ParsedReceipt {
+    sender: Option<String>,
+    bank: Option<String>,
+    amount: Option<String>,
+}
+
+/// Extract sender name, bank name, and amount from raw OCR text.
+fn parse_receipt(text: &str) -> ParsedReceipt {
+    let lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+
+    // --- Amount ---
+    // Tesseract often renders ₦ as #, so match both.
+    // Patterns: #97,800.00  ₦97,800.00  NGN 97,800.00
+    let amount_re = Regex::new(r"(?:[#₦]|NGN\s*)[\d,]+(?:\.\d{1,2})?").unwrap();
+    let amount = amount_re.find(text).map(|m| {
+        m.as_str().trim().replace('#', "₦")
+    });
+
+    // --- Sender + Bank ---
+    // Receipt layout (OPay / Moniepoint style):
+    //   "Sender Details  FULL NAME"   ← name on same line as label
+    //   "BankName | account"          ← bank on the very next line
+    let sender_label_re = Regex::new(r"(?i)sender\s+details?\s+(.+)").unwrap();
+    let fallback_sender_re = Regex::new(
+        r"(?i)(?:sender(?:\s+name)?|from|originator)\s*[:\-]?\s*([A-Za-z][A-Za-z\s]{2,40})"
+    ).unwrap();
+
+    let mut sender: Option<String> = None;
+    let mut bank: Option<String> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        // Try "Sender Details NAME" pattern first
+        if let Some(caps) = sender_label_re.captures(line) {
+            sender = caps.get(1).map(|m| m.as_str().trim().to_string());
+            // Bank is on the next non-empty line, before any "|"
+            if let Some(next) = lines.get(i + 1) {
+                let bank_name = next.split('|').next().unwrap_or(next).trim();
+                if !bank_name.is_empty() {
+                    bank = Some(bank_name.to_string());
+                }
+            }
+            break;
+        }
+    }
+
+    // Fallback sender if the label style was different
+    if sender.is_none() {
+        sender = fallback_sender_re
+            .captures(text)
+            .and_then(|c| c.get(1))
+            .map(|m| m.as_str().trim().to_string());
+    }
+
+    // Fallback bank: scan for known Nigerian bank / fintech names
+    if bank.is_none() {
+        let known_banks_re = Regex::new(
+            r"(?i)\b(gtbank|access bank|zenith bank|first bank|uba|opay|kuda|palmpay|moniepoint|monie point|sterling|polaris|fidelity|union bank|wema|stanbic|ecobank|providus)\b"
+        ).unwrap();
+        bank = known_banks_re.find(text).map(|m| m.as_str().trim().to_string());
+    }
+
+    ParsedReceipt { sender, bank, amount }
+}
+
+/// Print a ParsedReceipt to the terminal.
+fn print_parsed(parsed: &ParsedReceipt) {
+    println!("--- Parsed Receipt ---");
+    println!("Sender : {}", parsed.sender.as_deref().unwrap_or("not found"));
+    println!("Bank   : {}", parsed.bank.as_deref().unwrap_or("not found"));
+    println!("Amount : {}", parsed.amount.as_deref().unwrap_or("not found"));
+    println!("----------------------");
+}
+
+// --------------------------------------------------------------------------
 // API helpers
 // --------------------------------------------------------------------------
 
@@ -321,7 +400,11 @@ async fn main() {
                                     ocr_image(&path)
                                 };
                                 match result {
-                                    Ok(text) => println!("OCR result:\n{}", text),
+                                    Ok(text) => {
+                                        println!("OCR result:\n{}", text);
+                                        let parsed = parse_receipt(&text);
+                                        print_parsed(&parsed);
+                                    }
                                     Err(e) => eprintln!("OCR failed: {}", e),
                                 }
                             }

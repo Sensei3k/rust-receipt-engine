@@ -917,6 +917,7 @@ name = "receipt-engine"
 version = "0.1.0"
 dependencies = [
  "dotenv",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

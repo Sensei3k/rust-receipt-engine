@@ -19,3 +19,6 @@ dotenv = "0.15"
 
 # Tesseract OCR bindings
 tesseract = "0.14"
+
+# Regular expressions for receipt parsing
+regex = "1"
