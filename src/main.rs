@@ -6,6 +6,7 @@ mod whatsapp;
 use dotenv::dotenv;
 use std::env;
 use tokio::time::{sleep, Duration};
+use tracing::{error, info, warn};
 
 /// How long to wait between polls when the Green API queue is empty.
 const POLL_INTERVAL_SECS: u64 = 5;
@@ -13,6 +14,13 @@ const POLL_INTERVAL_SECS: u64 = 5;
 #[tokio::main]
 async fn main() {
     dotenv().ok();
+
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
 
     let instance_id = env::var("GREEN_API_INSTANCE_ID")
         .expect("GREEN_API_INSTANCE_ID must be set in .env");
@@ -22,9 +30,9 @@ async fn main() {
 
     let client = reqwest::Client::new();
 
-    println!(
-        "Receipt engine started. Polling for messages every {} seconds...",
-        POLL_INTERVAL_SECS
+    info!(
+        poll_interval_secs = POLL_INTERVAL_SECS,
+        "Receipt engine started"
     );
 
     loop {
@@ -39,17 +47,16 @@ async fn main() {
                         let is_pdf =
                             file_data.mime_type.as_deref() == Some("application/pdf");
 
-                        println!(
-                            "{} detected — downloading...",
-                            if is_pdf { "PDF" } else { "Image" }
+                        info!(
+                            file_type = if is_pdf { "PDF" } else { "Image" },
+                            "File detected, downloading"
                         );
 
                         match whatsapp::download_file(&client, file_data, notification.receipt_id)
                             .await
                         {
                             Ok(path) => {
-                                println!("File saved to: {}", path.display());
-                                println!("Running OCR...");
+                                info!(path = %path.display(), "File saved, running OCR");
 
                                 let ocr_result = if is_pdf {
                                     extractor::ocr_pdf(&path)
@@ -59,7 +66,7 @@ async fn main() {
 
                                 match ocr_result {
                                     Ok(text) => {
-                                        println!("OCR result:\n{}", text);
+                                        info!(ocr_text = %text, "OCR complete");
                                         let parsed = parser::parse_receipt(&text);
                                         parser::print_parsed(&parsed);
 
@@ -85,25 +92,25 @@ async fn main() {
                                             )
                                             .await
                                             {
-                                                Ok(_) => println!("Reply sent to {}", chat_id),
+                                                Ok(_) => info!(chat_id, "Reply sent"),
                                                 Err(e) => {
-                                                    eprintln!("Failed to send reply: {}", e);
+                                                    error!(error = %e, "Failed to send reply");
                                                     processing_ok = false;
                                                 }
                                             }
                                         } else {
-                                            eprintln!("No chat_id found — cannot send reply");
+                                            error!("No chat_id found — cannot send reply");
                                             processing_ok = false;
                                         }
                                     }
                                     Err(e) => {
-                                        eprintln!("OCR failed: {}", e);
+                                        error!(error = %e, "OCR failed");
                                         processing_ok = false;
                                     }
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Failed to download file: {}", e);
+                                error!(error = %e, "Failed to download file");
                                 processing_ok = false;
                             }
                         }
@@ -113,9 +120,9 @@ async fn main() {
                 // Always acknowledge the notification to prevent infinite reprocessing.
                 // If processing failed, log a clear discard notice so nothing is silent.
                 if !processing_ok {
-                    eprintln!(
-                        "Discarding receipt {} after processing failure — will not retry.",
-                        notification.receipt_id
+                    warn!(
+                        receipt_id = notification.receipt_id,
+                        "Discarding receipt after processing failure — will not retry"
                     );
                 }
 
@@ -127,16 +134,16 @@ async fn main() {
                 )
                 .await
                 {
-                    eprintln!("Warning: failed to delete notification: {}", e);
+                    warn!(error = %e, "Failed to delete notification");
                 }
             }
 
             Ok(None) => {
-                println!("[tick] No new messages.");
+                info!("No new messages");
             }
 
             Err(e) => {
-                eprintln!("Error polling Green API: {}", e);
+                error!(error = %e, "Error polling Green API");
             }
         }
 

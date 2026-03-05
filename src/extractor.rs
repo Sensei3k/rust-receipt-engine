@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use tracing::{error, info};
 
 /// Runs Tesseract OCR on the image file at the given path and returns the extracted text.
 pub fn ocr_image(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
@@ -54,10 +55,10 @@ pub fn ocr_pdf(pdf_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
         match candidates.iter().find(|p| p.exists()) {
             None => break,
             Some(page_path) => {
-                println!("  OCR page {}...", page);
+                info!(page, "Running OCR on page");
                 match ocr_image(page_path) {
                     Ok(text) => all_text.push_str(&text),
-                    Err(e) => eprintln!("  OCR failed on page {}: {}", page, e),
+                    Err(e) => error!(page, error = %e, "OCR failed on page"),
                 }
                 page += 1;
             }

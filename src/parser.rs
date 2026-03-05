@@ -1,6 +1,7 @@
 use crate::models::ParsedReceipt;
 use regex::Regex;
 use std::sync::LazyLock;
+use tracing::info;
 
 // Compiled once at first use — compiling regexes on every call is measurably expensive.
 static AMOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -79,11 +80,12 @@ pub fn parse_receipt(text: &str) -> ParsedReceipt {
     ParsedReceipt { sender, bank, amount }
 }
 
-/// Prints the fields of a ParsedReceipt to the terminal in a readable format.
+/// Logs the fields of a ParsedReceipt.
 pub fn print_parsed(parsed: &ParsedReceipt) {
-    println!("--- Parsed Receipt ---");
-    println!("Sender : {}", parsed.sender.as_deref().unwrap_or("not found"));
-    println!("Bank   : {}", parsed.bank.as_deref().unwrap_or("not found"));
-    println!("Amount : {}", parsed.amount.as_deref().unwrap_or("not found"));
-    println!("----------------------");
+    info!(
+        sender = parsed.sender.as_deref().unwrap_or("not found"),
+        bank = parsed.bank.as_deref().unwrap_or("not found"),
+        amount = parsed.amount.as_deref().unwrap_or("not found"),
+        "Parsed receipt"
+    );
 }

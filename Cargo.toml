@@ -22,3 +22,7 @@ tesseract = "0.14"
 
 # Regular expressions for receipt parsing
 regex = "1"
+
+# Structured logging — level filtering via RUST_LOG env var
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

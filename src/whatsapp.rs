@@ -2,6 +2,7 @@ use crate::models::{FileMessageData, Notification};
 use reqwest::Client;
 use std::path::PathBuf;
 use tokio::fs;
+use tracing::info;
 
 /// Returns the directory where downloaded receipt files are saved.
 /// Reads `RECEIPT_DOWNLOAD_DIR` from the environment; falls back to the
@@ -140,35 +141,43 @@ pub async fn download_file(
     Ok(dest)
 }
 
-/// Prints a human-readable summary of a notification to the terminal.
+/// Logs a human-readable summary of a notification.
 pub fn print_notification(n: &Notification) {
     let body = &n.body;
-    println!("---");
-    println!("Type   : {}", body.type_webhook);
+    let webhook_type = &body.type_webhook;
 
-    if let Some(s) = &body.sender_data {
-        println!(
-            "From   : {} ({})",
+    let (sender_name, sender) = body.sender_data.as_ref().map_or(
+        ("unknown", "unknown"),
+        |s| (
             s.sender_name.as_deref().unwrap_or("unknown"),
-            s.sender.as_deref().unwrap_or("unknown")
-        );
-    }
+            s.sender.as_deref().unwrap_or("unknown"),
+        ),
+    );
+
+    let msg_type = body
+        .message_data
+        .as_ref()
+        .map(|m| m.type_message.as_str())
+        .unwrap_or("none");
+
+    info!(
+        webhook_type,
+        sender_name,
+        sender,
+        msg_type,
+        "Notification received"
+    );
 
     if let Some(msg) = &body.message_data {
-        println!("MsgType: {}", msg.type_message);
-
         if let Some(text) = msg.text() {
-            println!("Text   : {}", text);
+            info!(text, "Text message");
         }
-
         if let Some(file) = &msg.file_message_data {
             if let Some(caption) = &file.caption {
                 if !caption.is_empty() {
-                    println!("Caption: {}", caption);
+                    info!(caption, "File caption");
                 }
             }
         }
     }
-
-    println!("---");
 }
