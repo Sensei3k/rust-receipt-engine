@@ -1,11 +1,37 @@
+# Rust build artifacts
 /target
-.env
 
-# Google service account key files — these are credentials, never commit them
+# Environment — secrets and local config
+.env
+.env.local
+.env.*.local
+
+# Google service account key files — never commit credentials
 service-account.json
 *.json.key
 *-key.json
 *-credentials.json
 credentials.json
 key.json
+*-sa-key.json
+*-service-account.json
+
+# SurrealDB embedded data directory
 data.surreal/
+
+# Tesseract OCR temp downloads
+/private/tmp/receipt_engine/
+
+# macOS filesystem noise
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Rust coverage reports
+tarpaulin-report.html
+lcov.info
