@@ -22,8 +22,6 @@ pub async fn init() -> Result<DbConn, surrealdb::Error> {
 
 /// Initialise an in-memory SurrealDB instance — used in integration tests
 /// to avoid touching the filesystem and to keep each test isolated.
-/// Initialise an in-memory SurrealDB instance — used in integration tests
-/// to avoid touching the filesystem and to keep each test isolated.
 pub async fn init_memory() -> Result<DbConn, surrealdb::Error> {
     use surrealdb::engine::local::Mem;
     let db = Surreal::new::<Mem>(()).await?;
