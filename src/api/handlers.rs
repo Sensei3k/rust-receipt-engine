@@ -7,7 +7,8 @@ use serde::Deserialize;
 use tracing::error;
 
 use crate::api::models::{
-    CreatePaymentRequest, Cycle, DbCycle, DbMember, DbPayment, Member, Payment, PaymentContent,
+    AppError, CreatePaymentRequest, Cycle, DbCycle, DbMember, DbPayment, Member, Payment,
+    PaymentContent, record_id_to_i64,
 };
 use crate::db::{reseed, DbConn};
 
@@ -18,46 +19,30 @@ pub struct PaymentsQuery {
     pub cycle_id: Option<i64>,
 }
 
-// --- GET handlers ---
+// ── GET handlers ──────────────────────────────────────────────────────────────
 
-pub async fn get_members(State(db): State<DbConn>) -> Result<Json<Vec<Member>>, StatusCode> {
-    let rows: Vec<DbMember> = match db.select("member").await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(error = %e, "Failed to fetch members");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-    Ok(Json(rows.into_iter().map(Member::from).collect()))
+pub async fn get_members(State(db): State<DbConn>) -> Result<Json<Vec<Member>>, AppError> {
+    let rows: Vec<DbMember> = db.select("member").await?;
+    let members: Result<Vec<Member>, AppError> = rows.into_iter().map(Member::try_from).collect();
+    Ok(Json(members?))
 }
 
-pub async fn get_cycles(State(db): State<DbConn>) -> Result<Json<Vec<Cycle>>, StatusCode> {
-    let rows: Vec<DbCycle> = match db.select("cycle").await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(error = %e, "Failed to fetch cycles");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
-    Ok(Json(rows.into_iter().map(Cycle::from).collect()))
+pub async fn get_cycles(State(db): State<DbConn>) -> Result<Json<Vec<Cycle>>, AppError> {
+    let rows: Vec<DbCycle> = db.select("cycle").await?;
+    let cycles: Result<Vec<Cycle>, AppError> = rows.into_iter().map(Cycle::try_from).collect();
+    Ok(Json(cycles?))
 }
 
 pub async fn get_payments(
     State(db): State<DbConn>,
     Query(params): Query<PaymentsQuery>,
-) -> Result<Json<Vec<Payment>>, StatusCode> {
-    let rows: Vec<DbPayment> = match db.select("payment").await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(error = %e, "Failed to fetch payments");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-    };
+) -> Result<Json<Vec<Payment>>, AppError> {
+    let rows: Vec<DbPayment> = db.select("payment").await?;
+    let payments: Result<Vec<Payment>, AppError> =
+        rows.into_iter().map(Payment::try_from).collect();
+    let payments = payments?;
 
-    let payments: Vec<Payment> = rows.into_iter().map(Payment::from).collect();
-
-    // Apply optional cycle_id filter in-process — simple enough that a second DB
-    // query would be premature abstraction for this data volume.
+    // Apply optional cycle_id filter in-process — simple enough at this data volume.
     let filtered = match params.cycle_id {
         Some(cid) => payments.into_iter().filter(|p| p.cycle_id == cid).collect(),
         None => payments,
@@ -66,14 +51,31 @@ pub async fn get_payments(
     Ok(Json(filtered))
 }
 
-// --- POST handler ---
+// ── POST handler ──────────────────────────────────────────────────────────────
 
 pub async fn create_payment(
     State(db): State<DbConn>,
     Json(body): Json<CreatePaymentRequest>,
-) -> Result<Json<Payment>, StatusCode> {
-    // Derive a new ID from the current timestamp (milliseconds) — simple, collision-
-    // resistant at the low transaction volume of an ajo circle.
+) -> Result<(StatusCode, Json<Payment>), AppError> {
+    body.validate()?;
+
+    // Verify member and cycle exist before writing — prevents dangling references.
+    let member: Option<DbMember> = db.select(("member", body.member_id)).await?;
+    if member.is_none() {
+        return Err(AppError::NotFound(format!(
+            "member {} does not exist",
+            body.member_id
+        )));
+    }
+    let cycle: Option<DbCycle> = db.select(("cycle", body.cycle_id)).await?;
+    if cycle.is_none() {
+        return Err(AppError::NotFound(format!(
+            "cycle {} does not exist",
+            body.cycle_id
+        )));
+    }
+
+    // Timestamp-based ID: unique at the low transaction volume of an ajo circle.
     let id = chrono::Utc::now().timestamp_millis();
 
     let content = PaymentContent {
@@ -84,74 +86,56 @@ pub async fn create_payment(
         payment_date: body.payment_date.clone(),
     };
 
-    if let Err(e) = db.upsert::<Option<DbPayment>>(("payment", id)).content(content).await {
-        error!(error = %e, "Failed to create payment");
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
+    // Read back the written record so the response reflects what is actually stored.
+    let created: Option<DbPayment> = db.upsert(("payment", id)).content(content).await?;
+    let db_payment = created.ok_or_else(|| {
+        error!(id, "Upsert returned None — payment may not have been persisted");
+        AppError::Internal("payment was not created".into())
+    })?;
 
-    Ok(Json(Payment {
-        id,
-        member_id: body.member_id,
-        cycle_id: body.cycle_id,
-        amount: body.amount,
-        currency: body.currency,
-        payment_date: body.payment_date,
-    }))
+    Ok((StatusCode::CREATED, Json(Payment::try_from(db_payment)?)))
 }
 
-// --- DELETE handler ---
+// ── DELETE handler ────────────────────────────────────────────────────────────
 
 /// DELETE /api/payments/:memberId/:cycleId
 ///
-/// Removes the payment for the given member+cycle combination. Matches the
-/// frontend's removePayment(memberId, cycleId) signature — the frontend does
-/// not track individual payment IDs.
+/// Removes the payment(s) for the given member+cycle combination using a
+/// WHERE-filtered query rather than a full table scan.
 pub async fn delete_payment(
     State(db): State<DbConn>,
     Path((member_id, cycle_id)): Path<(i64, i64)>,
-) -> StatusCode {
-    let rows: Vec<DbPayment> = match db.select("payment").await {
-        Ok(r) => r,
-        Err(e) => {
-            error!(error = %e, "Failed to fetch payments for delete");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    };
+) -> Result<StatusCode, AppError> {
+    // Targeted SELECT avoids loading every payment just to filter in-process.
+    let rows: Vec<DbPayment> = db
+        .query("SELECT * FROM payment WHERE member_id = $mid AND cycle_id = $cid")
+        .bind(("mid", member_id))
+        .bind(("cid", cycle_id))
+        .await?
+        .take(0)?;
 
-    let payments: Vec<Payment> = rows.into_iter().map(Payment::from).collect();
-
-    let to_delete: Vec<i64> = payments
-        .into_iter()
-        .filter(|p| p.member_id == member_id && p.cycle_id == cycle_id)
-        .map(|p| p.id)
-        .collect();
-
-    if to_delete.is_empty() {
-        return StatusCode::NOT_FOUND;
+    if rows.is_empty() {
+        return Err(AppError::NotFound(format!(
+            "no payment found for member {member_id} in cycle {cycle_id}"
+        )));
     }
 
-    for id in to_delete {
-        if let Err(e) = db.delete::<Option<DbPayment>>(("payment", id)).await {
-            error!(error = %e, payment_id = id, "Failed to delete payment");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
+    for row in rows {
+        let id = record_id_to_i64(row.id)?;
+        db.delete::<Option<DbPayment>>(("payment", id)).await?;
     }
 
-    StatusCode::NO_CONTENT
+    Ok(StatusCode::NO_CONTENT)
 }
 
-// --- Dev-only reset handler ---
+// ── Dev-only reset handler ────────────────────────────────────────────────────
 
 /// POST /api/test/reset
 ///
-/// Reseeds the payment table back to fixture state. Dev only — used by E2E tests
-/// to guarantee a clean, deterministic starting state before each test run.
-pub async fn reset_db(State(db): State<DbConn>) -> StatusCode {
-    match reseed(&db).await {
-        Ok(_) => StatusCode::OK,
-        Err(e) => {
-            error!(error = %e, "Failed to reseed database");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
-    }
+/// Reseeds all tables back to fixture state. Dev/test only — this route is not
+/// registered when APP_ENV=production. Used by E2E tests to guarantee a clean,
+/// deterministic starting state before each test run.
+pub async fn reset_db(State(db): State<DbConn>) -> Result<StatusCode, AppError> {
+    reseed(&db).await?;
+    Ok(StatusCode::OK)
 }
